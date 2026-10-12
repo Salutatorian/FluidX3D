@@ -161,6 +161,9 @@ public:
 		Kernel kernel_graphics_field_slice; // render one slice of velocity field according to slics settings
 		Kernel kernel_graphics_streamline; // render streamlines
 		Kernel kernel_graphics_q; // render vorticity (Q-criterion)
+		Memory<float> mesh; // gasCFD: original triangle mesh drawn in place of the voxelized surface
+		Kernel kernel_graphics_mesh;
+		uint mesh_triangles = 0u;
 
 #ifdef SURFACE
 		const string path_skybox = get_exe_path()+"../skybox/skybox8k.png";
@@ -194,6 +197,7 @@ public:
 			return *this;
 		}
 		void allocate(Device& device); // allocate memory for bitmap and zbuffer
+		void set_mesh(const vector<float>& triangles); // gasCFD: 18 floats per triangle, see graphics_mesh
 		bool enqueue_draw_frame(const int visualization_modes, const int field_mode=0, const int slice_mode=0, const int slice_x=0, const int slice_y=0, const int slice_z=0, const bool visualization_change=true); // main rendering function, calls rendering kernels, returns true if new frame is rendered, false if old frame is returned when camera has not moved
 		int* get_bitmap(); // returns pointer to bitmap
 		int* get_zbuffer(); // returns pointer to zbuffer
@@ -592,6 +596,7 @@ public:
 		}
 
 		int* draw_frame(); // main rendering function, calls rendering kernels
+		void set_mesh(const vector<const Mesh*>& meshes); // gasCFD: draw these meshes (as passed to voxelize_mesh_on_device) in place of the voxelized solid surface
 
 		void set_camera_centered(const float rx=0.0f, const float ry=0.0f, const float fov=100.0f, const float zoom=1.0f); // set camera centered
 		void set_camera_free(const float3& p=float3(0.0f), const float rx=0.0f, const float ry=0.0f, const float fov=100.0f); // set camera free

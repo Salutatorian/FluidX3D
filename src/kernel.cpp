@@ -2606,6 +2606,18 @@ string opencl_c_container() { return R( // ########################## begin of O
 		draw_triangle_interpolated(p+p0, p+p1, p+p2, c0, c1, c2, camera_cache, bitmap, zbuffer); // draw triangle with interpolated colors
 	}
 }
+)+R(kernel void graphics_mesh(const global float* camera, global int* bitmap, global int* zbuffer, const global float* triangles, const uint triangle_number) { // gasCFD: draw the original triangle mesh in place of the voxelized surface; 18 floats per triangle: 3 vertices, then 3 vertex normals
+	const uint n = get_global_id(0);
+	if(n>=triangle_number) return;
+	float camera_cache[15];
+	for(uint i=0u; i<15u; i++) camera_cache[i] = camera[i];
+	const global float* t = triangles+18u*n;
+	const float3 p0=(float3)(t[0], t[1], t[2]), p1=(float3)(t[3], t[4], t[5]), p2=(float3)(t[6], t[7], t[8]);
+	const int c0 = shading(0xDFDFDF, p0, (float3)(t[ 9], t[10], t[11]), camera_cache);
+	const int c1 = shading(0xDFDFDF, p1, (float3)(t[12], t[13], t[14]), camera_cache);
+	const int c2 = shading(0xDFDFDF, p2, (float3)(t[15], t[16], t[17]), camera_cache);
+	draw_triangle_interpolated(p0, p1, p2, c0, c1, c2, camera_cache, bitmap, zbuffer);
+}
 
 )+"#ifndef TEMPERATURE"+R(
 )+R(kernel void graphics_field(const global float* camera, global int* bitmap, global int* zbuffer, const int field_mode, const global float* rho, const global float* u, const global uchar* flags) {

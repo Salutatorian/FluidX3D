@@ -1406,6 +1406,15 @@ void main_setup() { // gasCFD Toyota Matrix road wind tunnel; required extension
 	lbm.voxelize_mesh_on_device(front, TYPE_S|TYPE_X); // stationary: spinning voxelized CadNav tires next to the stationary arches and brakes jet at the staircase corners and blow up
 	lbm.voxelize_mesh_on_device(rear, TYPE_S|TYPE_X);
 	const uint Nx=lbm.get_Nx(), Ny=lbm.get_Ny(), Nz=lbm.get_Nz();
+	const uint tiles_x=(Nx-1u)/8u, tiles_y=(Ny-1u)/8u;
+	Mesh road(2u*tiles_x*tiles_y, float3(0.0f)); // drawn only, the solid road is the z = 0 cell layer, whose surface sits half a cell up
+	for(uint j=0u; j<tiles_y; j++) for(uint i=0u; i<tiles_x; i++) {
+		const float x0=8.0f*(float)i, x1=x0+8.0f, y0=8.0f*(float)j, y1=y0+8.0f;
+		const uint k = 2u*(i+j*tiles_x);
+		road.p0[k   ] = float3(x0, y0, 0.5f); road.p1[k   ] = float3(x1, y0, 0.5f); road.p2[k   ] = float3(x1, y1, 0.5f);
+		road.p0[k+1u] = float3(x0, y0, 0.5f); road.p1[k+1u] = float3(x1, y1, 0.5f); road.p2[k+1u] = float3(x0, y1, 0.5f);
+	}
+	lbm.graphics.set_mesh({body, front, rear, &road}); // show the CadNav surface itself; the flow still sees the voxels, which sit within a cell of it
 	{ // air sealed inside the voxelized shells (cabin, tires, panels) would start at road speed and slosh against the inner walls forever, swinging the drag by +-20 Cd, so fill every pocket the outside air cannot reach
 		const auto is_solid = [&](const ulong n) { return (lbm.flags[n]&(TYPE_S|TYPE_E))==TYPE_S; };
 		vector<uchar> reached(lbm.get_N(), 0u);

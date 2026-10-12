@@ -1,4 +1,5 @@
 #include "lbm.hpp"
+#include <unordered_map>
 
 
 
@@ -533,6 +534,14 @@ void LBM_Domain::Graphics::allocate(Device& device) {
 #endif // PARTICLES
 }
 
+void LBM_Domain::Graphics::set_mesh(const vector<float>& triangles) {
+	mesh_triangles = (uint)(triangles.size()/18u);
+	mesh = Memory<float>(lbm->device, triangles.size());
+	for(ulong i=0ull; i<triangles.size(); i++) mesh[i] = triangles[i];
+	mesh.write_to_device();
+	kernel_graphics_mesh = Kernel(lbm->device, mesh_triangles, "graphics_mesh", camera_parameters, bitmap, zbuffer, mesh, mesh_triangles);
+}
+
 bool LBM_Domain::Graphics::update_camera() {
 	camera.update_matrix();
 	bool change = false;
@@ -557,7 +566,10 @@ bool LBM_Domain::Graphics::enqueue_draw_frame(const int visualization_modes, con
 	if(visualization_modes&VIS_PHI_RASTERIZE) kernel_graphics_rasterize_phi.enqueue_run();
 #endif // SURFACE
 	if(visualization_modes&VIS_FLAG_LATTICE) kernel_graphics_flags.enqueue_run();
-	if(visualization_modes&VIS_FLAG_SURFACE) kernel_graphics_flags_mc.enqueue_run();
+	if(visualization_modes&VIS_FLAG_SURFACE) {
+		if(mesh_triangles>0u) kernel_graphics_mesh.enqueue_run();
+		else kernel_graphics_flags_mc.enqueue_run();
+	}
 	if(visualization_modes&VIS_STREAMLINES) kernel_graphics_streamline.set_parameters(3u, field_mode, slice_mode, sx, sy, sz).enqueue_run();
 	if(visualization_modes&VIS_Q_CRITERION) kernel_graphics_q.set_parameters(3u, field_mode).enqueue_run();
 #ifdef PARTICLES
@@ -1210,6 +1222,38 @@ int* LBM::Graphics::draw_frame() {
 	}
 	camera.allow_labeling = new_frame; // only print new label on frame if a new frame has been rendered
 	return bitmap;
+}
+
+void LBM::Graphics::set_mesh(const vector<const Mesh*>& meshes) {
+	if(lbm->get_D()>1u) print_error("LBM::Graphics::set_mesh() supports a single domain only.");
+	vector<float3> p, face; // 3 vertices per triangle, area-weighted face normals
+	for(const Mesh* m : meshes) for(uint i=0u; i<m->triangle_number; i++) {
+		const float3 f = cross(m->p1[i]-m->p0[i], m->p2[i]-m->p0[i]);
+		if(length(f)==0.0f) continue;
+		p.push_back(m->p0[i]); p.push_back(m->p1[i]); p.push_back(m->p2[i]);
+		face.push_back(f);
+	}
+	std::unordered_map<ulong, uint> weld; // quantized position -> shared vertex, for smooth normals
+	vector<uint> vertex(p.size());
+	vector<float3> normal;
+	for(size_t i=0u; i<p.size(); i++) {
+		const ulong key = ((ulong)lroundf(64.0f*p[i].x)<<42)|((ulong)lroundf(64.0f*p[i].y)<<21)|(ulong)lroundf(64.0f*p[i].z);
+		const auto [it, inserted] = weld.try_emplace(key, (uint)normal.size());
+		if(inserted) normal.push_back(float3(0.0f));
+		vertex[i] = it->second;
+		const float3 f = face[i/3u];
+		normal[it->second] += dot(normal[it->second], f)<0.0f ? -f : f; // STL winding is not consistent and shading() ignores the sign, so align before summing
+	}
+	const float3 shift = float3(0.5f-0.5f*(float)lbm->get_Nx(), 0.5f-0.5f*(float)lbm->get_Ny(), 0.5f-0.5f*(float)lbm->get_Nz()); // the voxelizer puts cell x at mesh x, graphics puts it at x+0.5-Nx/2
+	vector<float> data(18u*face.size());
+	for(size_t i=0u; i<p.size(); i++) {
+		const float3 f = normalize(face[i/3u]), s = normalize(normal[vertex[i]]);
+		const float3 n = fabs(dot(f, s))>0.7f ? s : f; // keep creases sharper than about 45 degrees
+		const size_t t = 18u*(i/3u), k = 3u*(i%3u);
+		data[t+k] = p[i].x+shift.x; data[t+k+1u] = p[i].y+shift.y; data[t+k+2u] = p[i].z+shift.z;
+		data[t+9u+k] = n.x; data[t+9u+k+1u] = n.y; data[t+9u+k+2u] = n.z;
+	}
+	lbm->lbm_domain[0]->graphics.set_mesh(data);
 }
 
 void LBM::Graphics::set_camera_centered(const float rx, const float ry, const float fov, const float zoom) {
