@@ -1475,9 +1475,9 @@ void main_setup() { // gasCFD Toyota Matrix road wind tunnel; required extension
 		lbm.graphics.visualization_modes = VIS_FLAG_SURFACE|VIS_FIELD;
 		lbm.graphics.slice_mode = 1;
 		lbm.graphics.slice_x = Nx/2u;
-		lbm.graphics.field_mode = 1;
+		lbm.graphics.field_mode = 0; // velocity: the density slice is swamped by start-up sound waves ringing between the fixed boundaries
 		look_at(car+float3(1.6f*L, 0.3f*L, 0.05f*L), car+float3(0.0f, 0.3f*L, 0.0f), 55.0f);
-		lbm.graphics.write_frame(export_path+"pressure-slice/");
+		lbm.graphics.write_frame(export_path+"velocity-slice/");
 		lbm.graphics.visualization_modes = VIS_FLAG_SURFACE|VIS_STREAMLINES;
 		lbm.graphics.field_mode = 0;
 		lbm.graphics.write_frame(export_path+"side-streamlines/");
