@@ -1364,3 +1364,162 @@ void main_setup() { // benchmark; required extensions in defines.hpp: BENCHMARK,
 	lbm.run();
 	//lbm.run(1000u); lbm.u.read_from_device(); println(lbm.u.x[lbm.index(Nx/2u, Ny/2u, Nz/2u)]); wait(); // test for binary identity
 } /**/
+
+
+void main_setup() { // gasCFD Toyota Matrix road wind tunnel; required extensions in defines.hpp: FP16S, FORCE_FIELD, EQUILIBRIUM_BOUNDARIES, MOVING_BOUNDARIES, SUBGRID, INTERACTIVE_GRAPHICS or GRAPHICS
+	// arguments: <parts dir with body.stl, front-wheels.stl, rear-wheels.stl> [mph] [simulated seconds] [export dir] [VRAM MB] [video seconds, 0 = stills at the end]
+	const vector<string> args = main_arguments;
+	main_arguments.clear(); // LBM reads main_arguments as OpenCL device IDs
+	const string parts = args.size()>0u ? args[0]+"/" : get_exe_path()+"../stl/matrix/";
+	const float mph = args.size()>1u ? to_float(args[1]) : 60.0f;
+	const float si_T = args.size()>2u ? to_float(args[2]) : 0.6f;
+	const string export_path = args.size()>3u ? args[3]+"/" : get_exe_path()+"export/matrix/";
+	const uint memory = args.size()>4u ? to_uint(args[4]) : 6000u;
+	const float video_seconds = args.size()>5u ? to_float(args[5]) : 10.0f;
+	// ################################################################## define simulation box size, viscosity and volume force ###################################################################
+	const float3x3 to_lbm_axes(0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f); // gasCFD x (nose to tail) becomes FluidX3D y (flow direction), z stays up
+	Mesh* body = read_stl(parts+"body.stl", 1.0f, to_lbm_axes); // CadNav Toyota Matrix C0817078, split by server/tools/fluidx3d_parts.py
+	Mesh* front = read_stl(parts+"front-wheels.stl", 1.0f, to_lbm_axes);
+	Mesh* rear = read_stl(parts+"rear-wheels.stl", 1.0f, to_lbm_axes);
+	const float3 pmin = float3(fmin(fmin(body->pmin.x, front->pmin.x), rear->pmin.x), fmin(fmin(body->pmin.y, front->pmin.y), rear->pmin.y), fmin(fmin(body->pmin.z, front->pmin.z), rear->pmin.z));
+	const float3 pmax = float3(fmax(fmax(body->pmax.x, front->pmax.x), rear->pmax.x), fmax(fmax(body->pmax.y, front->pmax.y), rear->pmax.y), fmax(fmax(body->pmax.z, front->pmax.z), rear->pmax.z));
+	const float si_length = pmax.y-pmin.y, si_width = pmax.x-pmin.x, si_height = pmax.z-pmin.z;
+	const float si_u = mph*0.44704f;
+	const float si_nu=1.48E-5f, si_rho=1.225f;
+	const float lbm_u = 0.075f;
+	const uint3 lbm_N = resolution(float3(1.0f, 2.0f, 0.6f), memory); // input: simulation box aspect ratio and VRAM occupation in MB, output: grid resolution
+	const float lbm_length = 0.4f*(float)lbm_N.y;
+	units.set_m_kg_s(lbm_length, lbm_u, 1.0f, si_length, si_u, si_rho);
+	const float lbm_nu = units.nu(si_nu);
+	const ulong lbm_T = units.t(si_T);
+	print_info("Matrix "+to_string(si_length, 3u)+" x "+to_string(si_width, 3u)+" x "+to_string(si_height, 3u)+" m at "+to_string(mph, 1u)+" mph");
+	print_info("Re = "+to_string(to_uint(units.si_Re(si_length, si_u, si_nu)))+", cell = "+to_string(1000.0f*units.si_x(1.0f), 1u)+" mm, "+to_string(si_T, 3u)+" s = "+to_string(lbm_T)+" time steps");
+	LBM lbm(lbm_N, 1u, 1u, 1u, lbm_nu);
+	// ###################################################################################### define geometry ######################################################################################
+	const float cells_per_m = units.x(1.0f);
+	const float3 offset = float3(lbm.center().x-cells_per_m*0.5f*(pmin.x+pmax.x), 0.18f*(float)lbm_N.y-cells_per_m*pmin.y, 1.0f-cells_per_m*pmin.z); // nose 18% into the box, tires on the road
+	for(Mesh* mesh : {body, front, rear}) {
+		mesh->scale(cells_per_m);
+		mesh->translate(offset);
+	}
+	lbm.voxelize_mesh_on_device(body, TYPE_S|TYPE_X);
+	lbm.voxelize_mesh_on_device(front, TYPE_S|TYPE_X); // stationary: spinning voxelized CadNav tires next to the stationary arches and brakes jet at the staircase corners and blow up
+	lbm.voxelize_mesh_on_device(rear, TYPE_S|TYPE_X);
+	const uint Nx=lbm.get_Nx(), Ny=lbm.get_Ny(), Nz=lbm.get_Nz();
+	{ // air sealed inside the voxelized shells (cabin, tires, panels) would start at road speed and slosh against the inner walls forever, swinging the drag by +-20 Cd, so fill every pocket the outside air cannot reach
+		const auto is_solid = [&](const ulong n) { return (lbm.flags[n]&(TYPE_S|TYPE_E))==TYPE_S; };
+		vector<uchar> reached(lbm.get_N(), 0u);
+		vector<ulong> queue;
+		for(ulong n=0ull; n<lbm.get_N(); n++) {
+			uint x=0u, y=0u, z=0u; lbm.coordinates(n, x, y, z);
+			if((x==0u||y==0u||z==0u||x==Nx-1u||y==Ny-1u||z==Nz-1u)&&!is_solid(n)) { reached[n] = 1u; queue.push_back(n); }
+		}
+		for(size_t head=0u; head<queue.size(); head++) {
+			uint x=0u, y=0u, z=0u; lbm.coordinates(queue[head], x, y, z);
+			const uint3 next[6] = { uint3(x-1u, y, z), uint3(x+1u, y, z), uint3(x, y-1u, z), uint3(x, y+1u, z), uint3(x, y, z-1u), uint3(x, y, z+1u) };
+			for(const uint3& p : next) {
+				if(p.x>=Nx||p.y>=Ny||p.z>=Nz) continue; // also catches unsigned underflow at 0
+				const ulong j = lbm.index(p.x, p.y, p.z);
+				if(!reached[j]&&!is_solid(j)) { reached[j] = 1u; queue.push_back(j); }
+			}
+			if(head>(1ull<<24)&&head*2u>queue.size()) { queue.erase(queue.begin(), queue.begin()+(long long)head+1); head = (size_t)-1; } // keep the queue small
+		}
+		ulong pockets = 0ull;
+		for(ulong n=0ull; n<lbm.get_N(); n++) if(!reached[n]&&!is_solid(n)) { lbm.flags[n] = TYPE_S|TYPE_X; pockets++; }
+		print_info("sealed air pocket cells filled = "+to_string(pockets));
+	}
+	vector<uchar> shadow((size_t)Nx*(size_t)Nz, 0u); // frontal silhouette of the voxelized car
+	for(ulong n=0ull; n<lbm.get_N(); n++) if(lbm.flags[n]&TYPE_X) { uint x=0u, y=0u, z=0u; lbm.coordinates(n, x, y, z); shadow[(size_t)x+(size_t)z*(size_t)Nx] = 1u; }
+	ulong shadow_cells = 0ull;
+	for(const uchar s : shadow) shadow_cells += (ulong)s;
+	const float si_A = (float)shadow_cells*sq(units.si_x(1.0f));
+	print_info("frontal area of voxelized car = "+to_string(si_A, 3u)+" m^2");
+	parallel_for(lbm.get_N(), [&](ulong n) { uint x=0u, y=0u, z=0u; lbm.coordinates(n, x, y, z);
+		if(!(lbm.flags[n]&TYPE_S)) lbm.u.y[n] = lbm_u; // air at road speed relative to the car
+		if(x==0u||x==Nx-1u||y==0u||y==Ny-1u||z==Nz-1u) lbm.flags[n] = TYPE_E;
+		if(z==0u) { lbm.flags[n] = TYPE_S; lbm.u.y[n] = lbm_u; } // road moves with the air
+	}); // ####################################################################### run simulation, export images and data ##########################################################################
+	const float q_A = 0.5f*si_rho*sq(si_u)*si_A;
+	double cd_sum = 0.0;
+	ulong cd_samples = 0ull;
+	string cd_history = "";
+	const auto sample_cd = [&]() {
+#ifdef FORCE_FIELD
+		const float cd = units.si_F(lbm.object_force(TYPE_S|TYPE_X).y)/q_A;
+#else // FORCE_FIELD
+		const float cd = 0.0f*q_A;
+#endif // FORCE_FIELD
+		if(lbm.get_t()>lbm_T/2ull) { cd_sum += (double)cd; cd_samples++; }
+		cd_history += string(cd_history.empty() ? "" : ", ")+"["+to_string(units.si_t(lbm.get_t()), 5u)+", "+to_string(cd, 4u)+"]";
+		return cd;
+	};
+	const float3 car = float3(0.0f, cells_per_m*0.5f*(pmin.y+pmax.y)+offset.y-0.5f*(float)Ny, cells_per_m*0.5f*si_height+1.0f-0.5f*(float)Nz); // car center relative to box center
+	const float L = cells_per_m*si_length;
+	const auto look_at = [&](const float3& from, const float3& to, const float fov) { // invert Camera::update_matrix(), which views along -R.z
+		const float3 d = normalize(from-to);
+		const float h = sqrt(sq(d.x)+sq(d.y));
+		lbm.graphics.set_camera_free(from, degrees(atan2(d.x/h, -d.y/h))-90.0f, degrees(asin(d.z)), fov);
+	};
+#if defined(GRAPHICS) && !defined(INTERACTIVE_GRAPHICS)
+	const auto export_views = [&]() {
+		lbm.graphics.field_mode = 0;
+		lbm.graphics.visualization_modes = VIS_FLAG_SURFACE|VIS_STREAMLINES;
+		lbm.graphics.slice_mode = 1; // streamlines seeded through the whole box hide the car behind a wall of lines
+		lbm.graphics.slice_x = Nx/2u;
+		look_at(car+float3(0.95f*L, -0.95f*L, 0.45f*L), car+float3(0.0f, 0.1f*L, -0.1f*L), 50.0f);
+		lbm.graphics.write_frame(export_path+"streamlines/");
+		lbm.graphics.slice_mode = 0;
+		lbm.graphics.visualization_modes = VIS_FLAG_SURFACE|VIS_Q_CRITERION;
+		look_at(car+float3(0.85f*L, 1.25f*L, 0.5f*L), car+float3(0.0f, 0.45f*L, -0.1f*L), 55.0f);
+		lbm.graphics.write_frame(export_path+"vortices/");
+		lbm.graphics.visualization_modes = VIS_FLAG_SURFACE|VIS_FIELD;
+		lbm.graphics.slice_mode = 1;
+		lbm.graphics.slice_x = Nx/2u;
+		lbm.graphics.field_mode = 1;
+		look_at(car+float3(1.6f*L, 0.3f*L, 0.05f*L), car+float3(0.0f, 0.3f*L, 0.0f), 55.0f);
+		lbm.graphics.write_frame(export_path+"pressure-slice/");
+		lbm.graphics.visualization_modes = VIS_FLAG_SURFACE|VIS_STREAMLINES;
+		lbm.graphics.field_mode = 0;
+		lbm.graphics.write_frame(export_path+"side-streamlines/");
+		lbm.graphics.slice_mode = 3;
+		lbm.graphics.slice_z = (uint)(cells_per_m*0.45f*si_height)+1u;
+		look_at(car+float3(0.0f, 0.35f*L, 1.7f*L), car+float3(0.0f, 0.35f*L+1.0f, 0.0f), 55.0f);
+		lbm.graphics.write_frame(export_path+"top-streamlines/");
+		lbm.graphics.slice_mode = 0;
+	};
+	lbm.run(0u, lbm_T); // initialize simulation
+	while(lbm.get_t()<lbm_T) { // main simulation loop
+		if(video_seconds>0.0f&&lbm.graphics.next_frame(lbm_T, video_seconds)) export_views();
+		lbm.run(25u, lbm_T); // the drag carries a 4-step lattice oscillation, so sample at an odd interval to cover all of its phases
+		const float cd = sample_cd();
+		if(lbm.get_t()%1000ull<25ull) print_info("t = "+to_string(units.si_t(lbm.get_t()), 4u)+" s, Cd (FluidX3D) = "+to_string(cd, 3u));
+	}
+	if(video_seconds<=0.0f) export_views();
+	const float cd_mean = cd_samples>0ull ? (float)(cd_sum/(double)cd_samples) : 0.0f;
+	write_file(export_path+"result.json", "{\n"
+		"  \"solver\": \"FluidX3D lattice Boltzmann (D3Q19 SRT, FP16S, Smagorinsky subgrid)\",\n"
+		"  \"mph\": "+to_string(mph, 2u)+",\n"
+		"  \"simulated_seconds\": "+to_string(si_T, 4u)+",\n"
+		"  \"time_steps\": "+to_string(lbm.get_t())+",\n"
+		"  \"grid\": ["+to_string(Nx)+", "+to_string(Ny)+", "+to_string(Nz)+"],\n"
+		"  \"cell_mm\": "+to_string(1000.0f*units.si_x(1.0f), 2u)+",\n"
+		"  \"frontal_area_m2\": "+to_string(si_A, 4u)+",\n"
+		"  \"blockage_ratio\": "+to_string(si_A/(units.si_x((float)Nx)*units.si_x((float)Nz)), 4u)+",\n"
+		"  \"cd_mean_second_half\": "+to_string(cd_mean, 4u)+",\n"
+		"  \"cd_samples\": "+to_string(cd_samples)+",\n"
+		"  \"cd_history\": ["+cd_history+"],\n"
+		"  \"ground\": \"moving at road speed\",\n"
+		"  \"wheels\": \"stationary (not rotating)\"\n"
+		"}\n");
+	print_info("mean Cd (FluidX3D, second half) = "+to_string(cd_mean, 3u));
+#else // INTERACTIVE_GRAPHICS
+	lbm.graphics.visualization_modes = VIS_FLAG_SURFACE|VIS_Q_CRITERION;
+	look_at(car+float3(0.85f*L, 1.25f*L, 0.5f*L), car+float3(0.0f, 0.45f*L, -0.1f*L), 55.0f);
+	key_P = true; // start running right away
+	lbm.run(0u);
+	while(running) {
+		lbm.run(100u);
+		print_info("t = "+to_string(units.si_t(lbm.get_t()), 4u)+" s, Cd (FluidX3D) = "+to_string(sample_cd(), 3u));
+	}
+#endif // INTERACTIVE_GRAPHICS
+} /**/

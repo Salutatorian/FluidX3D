@@ -1,5 +1,7 @@
 bin/
 temp/
+bin-export/
+temp-export/
 stl/
 .vs/
 FluidX3D.vcxproj.user

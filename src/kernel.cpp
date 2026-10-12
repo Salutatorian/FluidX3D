@@ -2596,10 +2596,7 @@ string opencl_c_container() { return R( // ########################## begin of O
 		const float3 p2 = triangle_vertices[vertex_indices[3u*i+2u]];
 		int c0=0xDFDFDF, c1=0xDFDFDF, c2=0xDFDFDF;
 )+"#ifdef FORCE_FIELD"+R(
-		const float3 normal = normalize(cross(p1-p0, p2-p0));
-		c0 = colorscale_twocolor(0.5f+def_scale_F*dot(trilinear3(p0, Fj), normal));
-		c1 = colorscale_twocolor(0.5f+def_scale_F*dot(trilinear3(p1, Fj), normal));
-		c2 = colorscale_twocolor(0.5f+def_scale_F*dot(trilinear3(p2, Fj), normal));
+		const float3 normal = normalize(cross(p1-p0, p2-p0)); // gasCFD: FORCE_FIELD is only for drag; per-cell forces on a voxelized car are too noisy to color the surface
 )+"#else"+R( // FORCE_FIELD
 		const float3 normal = cross(p1-p0, p2-p0); // no normalize needed for shading()
 )+"#endif"+R( // FORCE_FIELD
